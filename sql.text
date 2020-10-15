@@ -1,0 +1,506 @@
+
+
+CREATE TABLE TeaserStatistics
+(
+    event Enum8('VIEWS' = 1, 'CLICKS' = 2),
+    eventDate Date,
+    eventTime DateTime,
+    userID UInt32,
+    newsID UInt32,
+    teaserID UInt32,
+    teaserPosition UInt16,
+    isMobile UInt8,
+    platform String,
+    iso Nullable(FixedString(4)),
+    price Nullable(Float32),
+    abtest Nullable(Enum8('A' = 1, 'B' = 2)),
+    fromNews Nullable(UInt16),
+    utm Nullable(String),
+    utmSource Nullable(String),
+    utmMedium Nullable(String),
+    utmContent Nullable(String),
+    utmCampaign Nullable(String),
+    userAgent Nullable(String)
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(eventDate)
+ORDER BY (teaserID, eventDate, userID)
+SETTINGS index_granularity = 8192
+
+
+CREATE TABLE Lead
+(
+    teaserID UInt32,
+    userID UInt32,
+    order UInt64,
+    eventDate Date,
+    eventTime DateTime,
+    createdAt UInt64,
+    status Enum8('NEW' = 1, 'APPROVED' = 2, 'CANCELED' = 3, 'INVALID' = 4),
+    sum UInt32,
+    nt Enum8('f' = 1,'n' = 2, 'nf' = 3)
+)
+ENGINE = ReplacingMergeTree()
+PARTITION BY toYYYYMM(eventDate)
+ORDER BY (teaserID, userID, order)
+SETTINGS index_granularity = 8192
+
+
+// --------------- Dictionary
+create table TeaserDictionary (
+    id UInt64,
+    img UInt32,
+    text String,
+    url String,
+    sum_rate Float32,
+    sum_ratem Float32,
+    status UInt8,
+    statusD UInt8,
+    statusM UInt8,
+    nisha UInt32,
+    idCampaign UInt8
+) 
+Engine = Dictionary(dict_teaser);
+
+
+// -------------- Unique Views Desktop
+CREATE MATERIALIZED VIEW TeaserUniqueViewsDesktop
+ENGINE = SummingMergeTree
+PARTITION BY eventDate ORDER BY (eventDate, teaserID)
+POPULATE
+AS 
+    SELECT
+        eventDate,
+        teaserID,
+    	uniq(userID) as uniqueViews,
+	sum(price) as finalPrice
+    FROM
+    	TeaserStatistics
+    WHERE
+        event = 'VIEWS' AND
+        isMobile = 0
+    GROUP BY 
+	eventDate, teaserID
+
+// -------------- Unique Views Mobile
+CREATE MATERIALIZED VIEW TeaserUniqueViewsMobile
+ENGINE = SummingMergeTree
+PARTITION BY eventDate ORDER BY (eventDate, teaserID)
+POPULATE
+AS 
+    SELECT
+        eventDate,
+        teaserID,
+    	uniq(userID) as uniqueViews,
+	sum(price) as finalPrice
+    FROM
+    	TeaserStatistics
+    WHERE
+        event = 'VIEWS' AND
+        isMobile = 1
+    GROUP BY 
+	eventDate, teaserID
+
+
+---------------------------------------------- clicks ------------
+// -------------- Unique Clicks Desktop
+CREATE MATERIALIZED VIEW TeaserUniqueClicksDesktop
+ENGINE = SummingMergeTree
+PARTITION BY eventDate ORDER BY (eventDate, teaserID)
+POPULATE
+AS 
+    SELECT
+        eventDate,
+        teaserID,
+    	uniq(userID) as uniqueClicks
+    FROM
+    	TeaserStatistics
+    WHERE
+        event = 'CLICKS' AND
+        isMobile = 0
+    GROUP BY 
+	    eventDate, teaserID
+
+// -------------- Unique Clicks Mobile
+CREATE MATERIALIZED VIEW TeaserUniqueClicksMobile
+ENGINE = SummingMergeTree
+PARTITION BY eventDate ORDER BY (eventDate, teaserID)
+POPULATE
+AS 
+    SELECT
+        eventDate,
+        teaserID,
+    	uniq(userID) as uniqueClicks
+    FROM
+    	TeaserStatistics
+    WHERE
+        event = 'CLICKS' AND
+        isMobile = 1
+    GROUP BY 
+	    eventDate, teaserID
+
+// -------------- Lead manual collapsed
+CREATE VIEW LeadCollapsed
+AS 
+    SELECT
+        eventDate,
+        teaserID,
+        order
+    FROM
+        Lead
+    WHERE
+        1
+    GROUP BY 
+	eventDate, teaserID, order
+
+
+// -------------- Approved desktop
+CREATE MATERIALIZED VIEW ApprovedDesktop
+ENGINE = SummingMergeTree
+PARTITION BY eventDate ORDER BY (eventDate, teaserID)
+POPULATE
+AS 
+    SELECT
+        lc.eventDate as eventDate,
+        lc.teaserID as teaserID,
+        sum(l.sum) as finalSum,
+        count(l.sum) as finalCount
+    FROM
+    (
+        SELECT
+            eventDate,
+            userID,
+            teaserID,
+            eventTime,
+            utmSource,
+            isMobile
+        FROM TeaserStatistics
+        WHERE
+            event = 'CLICKS'
+    ) ts 
+    ANY LEFT JOIN
+    (
+        SELECT
+            eventDate,
+            userID,
+            teaserID,
+            order,
+            eventTime,
+            status,
+            sum,
+            nt
+        FROM Lead
+        ORDER BY createdAt DESC
+    ) l ON ts.teaserID = l.teaserID AND l.eventTime = ts.eventTime AND l.userID = ts.userID 
+    RIGHT SEMI JOIN
+    (
+        SELECT 
+            eventDate,
+            teaserID,
+            order
+        FROM
+            LeadCollapsed
+    ) lc ON lc.eventDate = l.eventDate AND lc.teaserID = l.teaserID AND l.order = lc.order
+    WHERE
+        ts.utmSource NOT IN ('','dm-tovar','mytarget','smilist.ru','tovarpop') AND
+        lc.teaserID != 0  AND
+        l.status = 'APPROVED' AND
+        ts.isMobile = 0
+    GROUP BY 
+        eventDate,  teaserID
+
+// -------------- Approved mobile
+CREATE MATERIALIZED VIEW ApprovedMobile
+ENGINE = SummingMergeTree
+PARTITION BY eventDate ORDER BY (eventDate, teaserID)
+POPULATE
+AS 
+    SELECT
+        lc.eventDate as eventDate,
+        lc.teaserID as teaserID,
+        sum(l.sum) as finalSum,
+        count(l.sum) as finalCount
+    FROM
+    (
+        SELECT
+            eventDate,
+            userID,
+            teaserID,
+            eventTime,
+            utmSource,
+            isMobile
+        FROM TeaserStatistics
+        WHERE
+            event = 'CLICKS'
+    ) ts 
+    ANY LEFT JOIN
+    (
+        SELECT
+            eventDate,
+            userID,
+            teaserID,
+            order,
+            eventTime,
+            status,
+            sum,
+            nt
+        FROM Lead
+        ORDER BY createdAt DESC
+    ) l ON ts.teaserID = l.teaserID AND l.eventTime = ts.eventTime AND l.userID = ts.userID 
+    RIGHT SEMI JOIN
+    (
+        SELECT 
+            eventDate,
+            teaserID,
+            order
+        FROM
+            LeadCollapsed
+    ) lc ON lc.eventDate = l.eventDate AND lc.teaserID = l.teaserID AND l.order = lc.order
+    WHERE
+        ts.utmSource NOT IN ('','dm-tovar','mytarget','smilist.ru','tovarpop') AND
+        lc.teaserID != 0  AND
+        l.status = 'APPROVED' AND
+        ts.isMobile = 1
+    GROUP BY 
+        eventDate,  teaserID
+
+// --- Подсчёт общего колличества лидов(Десктоп)
+CREATE MATERIALIZED VIEW LeadCountDesktop
+ENGINE = SummingMergeTree
+PARTITION BY eventDate ORDER BY (eventDate, teaserID)
+POPULATE
+AS 
+    SELECT
+        ts.eventDate as eventDate,
+        ts.teaserID as teaserID,
+        count(l.sum) as finalCount
+    FROM
+    (
+    SELECT
+            eventDate,
+            userID,
+            teaserID,
+            order,
+            eventTime,
+            status,
+            sum,
+            nt
+        FROM Lead
+        ORDER BY createdAt DESC
+    ) l 
+    ANY LEFT JOIN
+    (
+        SELECT
+            eventDate,
+            userID,
+            teaserID,
+            eventTime,
+            utmSource,
+            isMobile
+        FROM TeaserStatistics
+        WHERE
+            event = 'CLICKS'
+    ) ts ON ts.teaserID = l.teaserID AND ts.eventTime = l.eventTime AND ts.userID = l.userID
+    RIGHT SEMI JOIN
+    (
+        SELECT 
+            eventDate,
+            teaserID,
+            order
+        FROM
+            LeadCollapsed
+    ) lc ON lc.eventDate = l.eventDate AND lc.teaserID = l.teaserID AND l.order = lc.order
+    WHERE
+        ts.utmSource NOT IN ('','dm-tovar','mytarget','smilist.ru','tovarpop') AND
+        lc.teaserID != 0  AND
+        ts.isMobile = 0
+    GROUP BY 
+        eventDate,  teaserID
+        
+    
+// --- Подсчёт общего колличества лидов(Мобилка)
+CREATE MATERIALIZED VIEW LeadCountMobile
+ENGINE = SummingMergeTree
+PARTITION BY eventDate ORDER BY (eventDate, teaserID)
+POPULATE
+AS 
+    SELECT
+        lc.eventDate as eventDate,
+        lc.teaserID as teaserID,
+        count(l.sum) as finalCount
+    FROM
+    (
+        SELECT
+            eventDate,
+            userID,
+            teaserID,
+            eventTime,
+            utmSource,
+            isMobile
+        FROM TeaserStatistics
+        WHERE
+            event = 'CLICKS'
+    ) ts 
+    ANY LEFT JOIN
+    (
+        SELECT
+            eventDate,
+            userID,
+            teaserID,
+            order,
+            eventTime,
+            status,
+            sum,
+            nt
+        FROM Lead
+        ORDER BY createdAt DESC
+    ) l ON ts.teaserID = l.teaserID AND l.eventTime = ts.eventTime AND l.userID = ts.userID 
+    RIGHT SEMI JOIN
+    (
+        SELECT 
+            eventDate,
+            teaserID,
+            order
+        FROM
+            LeadCollapsed
+    ) lc ON lc.eventDate = l.eventDate AND lc.teaserID = l.teaserID AND l.order = lc.order
+    WHERE
+        ts.utmSource NOT IN ('','dm-tovar','mytarget','smilist.ru','tovarpop') AND
+        lc.teaserID != 0 AND
+        ts.isMobile = 1
+    GROUP BY 
+        eventDate,  teaserID
+
+        
+//  ---------- Суммарная статистика по тизерам
+CREATE VIEW AgregatedTeaserStatistics
+AS
+    SELECT
+        ts.eventDate as "date",
+        ts.teaserID as "teaserid",
+        max(tuvd.uniqueViews) as "viewsUD",
+        max(tuvm.uniqueViews) as "viewsUM",
+        max(tuvd.uniqueViews) + max(tuvm.uniqueViews) as "viewsU",
+        max(tucd.uniqueClicks) as "clicksUD",
+        max(tucm.uniqueClicks) as "clicksUM",
+        max(tucd.uniqueClicks) + max(tucm.uniqueClicks) as "clicksU",
+        max(ad.finalSum) as "vecpm_sum_d",
+        max(ad.finalCount) as "approveCountD",
+        max(am.finalSum) as "vecpm_sum_m",
+        max(am.finalCount) as "approveCountM",
+        max(ad.finalSum) + max(am.finalSum) as "vecpm_sum",
+        max(ad.finalCount) + max(am.finalCount) as "approveCount",
+        (max(tuvd.finalPrice) + max(tuvm.finalPrice))/viewsU as "price",
+        max(tuvd.finalPrice)/viewsU as "price_d",
+        max(tuvm.finalPrice)/viewsU as "price_m",
+        max(lcd.finalCount) as "LeadCountD",
+        max(lcm.finalCount) as "LeadCountM",
+        max(lcd.finalCount) + max(lcm.finalCount) as "LeadCount"
+    FROM
+        (
+            SELECT 
+                teaserID,
+                eventDate,
+                eventTime,
+                price
+            FROM
+                TeaserStatistics
+        ) ts
+        LEFT JOIN
+        (
+            SELECT
+                teaserID,
+                eventDate,
+                uniqueViews,
+                finalPrice
+            FROM 
+                TeaserUniqueViewsDesktop tuvd
+        ) tuvd ON tuvd.teaserID = ts.teaserID AND tuvd.eventDate = ts.eventDate
+        LEFT JOIN
+        (
+            SELECT
+                teaserID,
+                eventDate,
+                uniqueViews,
+                finalPrice
+            FROM 
+                TeaserUniqueViewsMobile tuvm
+        ) tuvm ON tuvm.teaserID = ts.teaserID AND tuvm.eventDate = ts.eventDate
+        LEFT JOIN
+        (
+            SELECT
+                teaserID,
+                eventDate,
+                uniqueClicks
+            FROM 
+                TeaserUniqueClicksDesktop tucd
+        ) tucd ON tucd.teaserID = ts.teaserID AND tucd.eventDate = ts.eventDate 
+        LEFT JOIN
+        (
+            SELECT
+                teaserID,
+                eventDate,
+                uniqueClicks
+            FROM 
+                TeaserUniqueClicksMobile tucm
+        ) tucm ON tucm.teaserID = ts.teaserID AND tucm.eventDate = ts.eventDate 
+        LEFT JOIN
+        (
+            SELECT
+                teaserID,
+                eventDate,
+                finalSum,
+                finalCount
+            FROM 
+                ApprovedDesktop ad
+        ) ad ON ad.teaserID = ts.teaserID AND ad.eventDate = ts.eventDate 
+        LEFT JOIN
+        (
+            SELECT
+                teaserID,
+                eventDate,
+                finalSum,
+                finalCount
+            FROM 
+                ApprovedMobile am
+        ) am ON am.teaserID = ts.teaserID AND am.eventDate = ts.eventDate 
+        LEFT JOIN
+        (
+            SELECT
+                teaserID,
+                eventDate,
+                finalCount
+            FROM 
+                LeadCountDesktop
+        ) lcd ON lcd.teaserID = ts.teaserID AND lcd.eventDate = ts.eventDate 
+        LEFT JOIN
+        (
+            SELECT
+                teaserID,
+                eventDate,
+                finalCount
+            FROM 
+                LeadCountMobile
+        ) lcm ON lcm.teaserID = ts.teaserID AND lcm.eventDate = ts.eventDate 
+    WHERE
+        1
+    GROUP BY 
+        ts.eventDate, ts.teaserID
+    ORDER BY 
+        ts.eventDate ASC, ts.teaserID ASC
+    
+
+// ----------------------------------------------------------
+
+SELECT 
+    td.id,
+    ats.*
+FROM 
+    TeaserDictionary td
+    LEFT JOIN AgregatedTeaserStatistics ats ON toUInt64(ats.teaserid) = td.id
+
+
+
+
+
+    
